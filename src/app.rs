@@ -7,7 +7,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::db::Database;
 use crate::github;
-use crate::model::{GithubUpdate, Task};
+use crate::model::{GithubUpdate, Task, TaskStatus};
 
 const REFRESH_INTERVAL: Duration = Duration::from_secs(60);
 
@@ -16,7 +16,14 @@ pub enum Mode {
     Setup,
     Normal,
     CreateTask,
+    EditDescription,
     Details,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CreateField {
+    Title,
+    Description,
 }
 
 type SyncResult = Result<Vec<GithubUpdate>>;
@@ -29,6 +36,8 @@ pub struct App {
     pub selected: usize,
     pub mode: Mode,
     pub input: String,
+    pub description_input: String,
+    pub create_field: CreateField,
     pub error: Option<String>,
     pub notice: Option<String>,
     pub should_quit: bool,
@@ -54,6 +63,8 @@ impl App {
             selected: 0,
             mode,
             input: String::new(),
+            description_input: String::new(),
+            create_field: CreateField::Title,
             error: None,
             notice: None,
             should_quit: false,
@@ -82,6 +93,7 @@ impl App {
             Mode::Setup => self.handle_setup_key(key),
             Mode::Normal => self.handle_normal_key(key),
             Mode::CreateTask => self.handle_create_key(key),
+            Mode::EditDescription => self.handle_edit_description_key(key),
             Mode::Details => self.handle_details_key(key),
         }
     }
@@ -135,9 +147,13 @@ impl App {
                 if self.ensure_github_username()? {
                     self.mode = Mode::CreateTask;
                     self.input.clear();
+                    self.description_input.clear();
+                    self.create_field = CreateField::Title;
                     self.error = None;
                 }
             }
+            KeyCode::Char('d') => self.toggle_selected_done()?,
+            KeyCode::Char('e') => self.start_editing_description(),
             KeyCode::Char('y') => self.copy_selected_branch(),
             KeyCode::Char('r') => {
                 if self.is_syncing() {
@@ -160,8 +176,15 @@ impl App {
         match key.code {
             KeyCode::Esc => {
                 self.input.clear();
+                self.description_input.clear();
                 self.error = None;
                 self.mode = Mode::Normal;
+            }
+            KeyCode::Tab | KeyCode::BackTab => {
+                self.create_field = match self.create_field {
+                    CreateField::Title => CreateField::Description,
+                    CreateField::Description => CreateField::Title,
+                };
             }
             KeyCode::Enter => {
                 let title = self.input.trim().to_owned();
@@ -173,13 +196,64 @@ impl App {
                     .github_username
                     .as_deref()
                     .context("GitHub username is not configured")?;
-                let task = self.database.create_task(username, &title)?;
+                let description = self.description_input.trim().to_owned();
+                let task = self.database.create_task(username, &title, &description)?;
                 let id = task.id;
                 let branch = task.branch_name.clone();
                 self.reload_tasks(Some(id))?;
                 self.input.clear();
+                self.description_input.clear();
                 self.error = None;
                 self.notice = Some(format!("Created {branch}; press y to copy"));
+                self.mode = Mode::Normal;
+            }
+            KeyCode::Backspace => {
+                self.create_input().pop();
+                self.error = None;
+            }
+            KeyCode::Char(character) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.create_input().push(character);
+                self.error = None;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn create_input(&mut self) -> &mut String {
+        match self.create_field {
+            CreateField::Title => &mut self.input,
+            CreateField::Description => &mut self.description_input,
+        }
+    }
+
+    fn start_editing_description(&mut self) {
+        let Some(description) = self.selected_task().map(|task| task.description.clone()) else {
+            self.error = Some("There is no task to describe".into());
+            return;
+        };
+        self.input = description;
+        self.error = None;
+        self.mode = Mode::EditDescription;
+    }
+
+    fn handle_edit_description_key(&mut self, key: KeyEvent) -> Result<()> {
+        match key.code {
+            KeyCode::Esc => {
+                self.input.clear();
+                self.error = None;
+                self.mode = Mode::Normal;
+            }
+            KeyCode::Enter => {
+                let Some(id) = self.selected_task().map(|task| task.id) else {
+                    self.mode = Mode::Normal;
+                    return Ok(());
+                };
+                self.database.set_description(id, self.input.trim())?;
+                self.reload_tasks(Some(id))?;
+                self.input.clear();
+                self.error = None;
+                self.notice = Some("Description saved".into());
                 self.mode = Mode::Normal;
             }
             KeyCode::Backspace => {
@@ -198,10 +272,28 @@ impl App {
     fn handle_details_key(&mut self, key: KeyEvent) -> Result<()> {
         match key.code {
             KeyCode::Esc | KeyCode::Enter => self.mode = Mode::Normal,
+            KeyCode::Char('d') => self.toggle_selected_done()?,
+            KeyCode::Char('e') => self.start_editing_description(),
             KeyCode::Char('y') => self.copy_selected_branch(),
             KeyCode::Char('q') => self.should_quit = true,
             _ => {}
         }
+        Ok(())
+    }
+
+    fn toggle_selected_done(&mut self) -> Result<()> {
+        let Some((id, status)) = self.selected_task().map(|task| (task.id, task.status)) else {
+            self.error = Some("There is no task to mark done".into());
+            return Ok(());
+        };
+        let (status, notice) = match status {
+            TaskStatus::Active => (TaskStatus::Complete, "Marked task done"),
+            TaskStatus::Complete => (TaskStatus::Active, "Reopened task"),
+        };
+        self.database.set_status(id, status)?;
+        self.reload_tasks(Some(id))?;
+        self.error = None;
+        self.notice = Some(notice.into());
         Ok(())
     }
 
@@ -277,7 +369,7 @@ impl App {
         let active_tasks = self
             .tasks
             .iter()
-            .filter(|task| task.status == crate::model::TaskStatus::Active)
+            .filter(|task| task.status == TaskStatus::Active)
             .cloned()
             .collect::<Vec<_>>();
         let (sender, receiver) = mpsc::channel();

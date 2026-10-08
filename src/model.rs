@@ -7,6 +7,13 @@ pub enum TaskStatus {
 }
 
 impl TaskStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Complete => "complete",
+        }
+    }
+
     pub fn from_db(value: &str) -> Self {
         match value {
             "complete" => Self::Complete,
@@ -80,6 +87,7 @@ impl fmt::Display for GithubStatus {
 pub struct Task {
     pub id: i64,
     pub title: String,
+    pub description: String,
     pub branch_name: String,
     pub status: TaskStatus,
     pub github_status: GithubStatus,

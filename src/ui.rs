@@ -6,7 +6,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Row, Table, TableState, Wrap};
 
-use crate::app::{App, Mode};
+use crate::app::{App, CreateField, Mode};
 use crate::model::{GithubStatus, Task, TaskStatus};
 
 const ACCENT: Color = Color::Rgb(120, 180, 255);
@@ -29,6 +29,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
 
     match app.mode {
         Mode::CreateTask => render_create_dialog(frame, app),
+        Mode::EditDescription => render_description_dialog(frame, app),
         Mode::Details => render_details_dialog(frame, app),
         Mode::Setup | Mode::Normal => {}
     }
@@ -165,6 +166,15 @@ fn task_lines(task: &Task) -> Vec<Line<'static>> {
         ]),
         labelled("Created", format_timestamp(task.created_at)),
     ];
+    if !task.description.is_empty() {
+        lines.splice(
+            1..1,
+            [
+                Line::from(""),
+                Line::styled(task.description.clone(), Style::default().fg(Color::Gray)),
+            ],
+        );
+    }
     if let Some(number) = task.pr_number {
         lines.push(labelled("PR", format!("#{number}")));
     }
@@ -192,6 +202,10 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
         Line::from(vec![
             Span::styled("c", key_style()),
             Span::raw(" create  "),
+            Span::styled("d", key_style()),
+            Span::raw(" done  "),
+            Span::styled("e", key_style()),
+            Span::raw(" describe  "),
             Span::styled("y", key_style()),
             Span::raw(" copy  "),
             Span::styled("r", key_style()),
@@ -218,7 +232,7 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn render_create_dialog(frame: &mut Frame, app: &App) {
-    let area = centered_rect(64, 7, frame.area());
+    let area = centered_rect(64, 11, frame.area());
     frame.render_widget(Clear, area);
     let block = Block::default()
         .title(" Create task ")
@@ -227,29 +241,100 @@ fn render_create_dialog(frame: &mut Frame, app: &App) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
     let sections = Layout::vertical([
-        Constraint::Length(1),
         Constraint::Length(3),
+        Constraint::Length(5),
         Constraint::Length(1),
     ])
     .split(inner);
-    frame.render_widget(Paragraph::new("Task title"), sections[0]);
-    frame.render_widget(
-        Paragraph::new(app.input.as_str()).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::Gray)),
+    let fields = [
+        (
+            CreateField::Title,
+            " Title ",
+            app.input.as_str(),
+            sections[0],
         ),
-        sections[1],
-    );
+        (
+            CreateField::Description,
+            " Description (optional) ",
+            app.description_input.as_str(),
+            sections[1],
+        ),
+    ];
+    for (field, title, value, area) in fields {
+        let focused = app.create_field == field;
+        let border = if focused { ACCENT } else { Color::DarkGray };
+        let block = Block::default()
+            .title(title)
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(border));
+        render_input(frame, value, block, area, focused);
+    }
     frame.render_widget(
-        Paragraph::new("Enter create  |  Esc cancel").alignment(Alignment::Right),
+        Paragraph::new("Tab switch field  |  Enter create  |  Esc cancel")
+            .alignment(Alignment::Right),
         sections[2],
     );
-    let cursor_x = sections[1].x + 1 + app.input.chars().count() as u16;
-    frame.set_cursor_position((
-        cursor_x.min(sections[1].right().saturating_sub(2)),
-        sections[1].y + 1,
-    ));
+}
+
+fn render_description_dialog(frame: &mut Frame, app: &App) {
+    let area = centered_rect(64, 9, frame.area());
+    frame.render_widget(Clear, area);
+    let title = app
+        .selected_task()
+        .map(|task| format!(" Describe: {} ", task.title))
+        .unwrap_or_else(|| " Describe task ".into());
+    let block = Block::default()
+        .title(title)
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(ACCENT));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let sections = Layout::vertical([Constraint::Length(5), Constraint::Length(1)]).split(inner);
+    let input_block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Gray));
+    render_input(frame, &app.input, input_block, sections[0], true);
+    frame.render_widget(
+        Paragraph::new("Enter save  |  Esc cancel").alignment(Alignment::Right),
+        sections[1],
+    );
+}
+
+/// Renders a text input wrapped at character boundaries, scrolled so the end of
+/// `value` stays visible, with the cursor placed after the last character.
+fn render_input(frame: &mut Frame, value: &str, block: Block, area: Rect, focused: bool) {
+    let inner = block.inner(area);
+    let lines = wrap_chars(value, inner.width.max(1) as usize);
+    let cursor_row = lines.len().saturating_sub(1) as u16;
+    let cursor_column = lines.last().map_or(0, |line| line.chars().count()) as u16;
+    let scroll = (cursor_row + 1).saturating_sub(inner.height);
+    let lines = lines.into_iter().map(Line::from).collect::<Vec<_>>();
+    frame.render_widget(Paragraph::new(lines).scroll((scroll, 0)).block(block), area);
+    if focused && inner.height > 0 {
+        frame.set_cursor_position((inner.x + cursor_column, inner.y + cursor_row - scroll));
+    }
+}
+
+/// Splits `value` into rows of at most `width` characters. A full last row is
+/// followed by an empty one, which is where the cursor goes next.
+fn wrap_chars(value: &str, width: usize) -> Vec<String> {
+    let mut lines = vec![String::new()];
+    for character in value.chars() {
+        if lines
+            .last()
+            .is_some_and(|line| line.chars().count() == width)
+        {
+            lines.push(String::new());
+        }
+        lines.last_mut().unwrap().push(character);
+    }
+    if lines
+        .last()
+        .is_some_and(|line| line.chars().count() == width)
+    {
+        lines.push(String::new());
+    }
+    lines
 }
 
 fn render_details_dialog(frame: &mut Frame, app: &App) {
@@ -259,7 +344,7 @@ fn render_details_dialog(frame: &mut Frame, app: &App) {
     frame.render_widget(
         Paragraph::new(lines).wrap(Wrap { trim: false }).block(
             Block::default()
-                .title(" Task details - y copy, Enter/Esc close ")
+                .title(" Task details - d done, e describe, y copy, Enter/Esc close ")
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(ACCENT)),
         ),
@@ -321,4 +406,16 @@ fn format_timestamp(timestamp: i64) -> String {
                 .to_string()
         })
         .unwrap_or_else(|| "Unknown".into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wraps_input_at_character_boundaries() {
+        assert_eq!(wrap_chars("", 4), [""]);
+        assert_eq!(wrap_chars("abc de", 4), ["abc ", "de"]);
+        assert_eq!(wrap_chars("abcd", 4), ["abcd", ""]);
+    }
 }

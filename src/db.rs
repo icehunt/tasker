@@ -43,9 +43,20 @@ impl Database {
                  created_at INTEGER NOT NULL,
                  completed_at INTEGER,
                  last_checked_at INTEGER
-             );
-             PRAGMA user_version = 1;",
+             );",
         )?;
+
+        let version: i64 = self
+            .connection
+            .query_row("PRAGMA user_version", [], |row| row.get(0))?;
+        if version < 2 {
+            let transaction = self.connection.transaction()?;
+            transaction.execute_batch(
+                "ALTER TABLE tasks ADD COLUMN description TEXT NOT NULL DEFAULT '';
+                 PRAGMA user_version = 2;",
+            )?;
+            transaction.commit()?;
+        }
         Ok(())
     }
 
@@ -89,12 +100,13 @@ impl Database {
         Ok(())
     }
 
-    pub fn create_task(&mut self, username: &str, title: &str) -> Result<Task> {
+    pub fn create_task(&mut self, username: &str, title: &str, description: &str) -> Result<Task> {
         let now = Utc::now().timestamp();
         let transaction = self.connection.transaction()?;
         transaction.execute(
-            "INSERT INTO tasks (title, branch_name, created_at) VALUES (?1, '', ?2)",
-            params![title, now],
+            "INSERT INTO tasks (title, description, branch_name, created_at)
+             VALUES (?1, ?2, '', ?3)",
+            params![title, description, now],
         )?;
         let id = transaction.last_insert_rowid();
         let branch_name = branch_name(username, id, title);
@@ -107,6 +119,7 @@ impl Database {
         Ok(Task {
             id,
             title: title.to_owned(),
+            description: description.to_owned(),
             branch_name,
             status: TaskStatus::Active,
             github_status: GithubStatus::NotPushed,
@@ -121,7 +134,7 @@ impl Database {
     pub fn tasks(&self) -> Result<Vec<Task>> {
         let mut statement = self.connection.prepare(
             "SELECT id, title, branch_name, status, github_status, pr_number, pr_url,
-                    created_at, completed_at, last_checked_at
+                    created_at, completed_at, last_checked_at, description
              FROM tasks
              ORDER BY CASE status WHEN 'active' THEN 0 ELSE 1 END, id DESC",
         )?;
@@ -131,6 +144,7 @@ impl Database {
             Ok(Task {
                 id: row.get(0)?,
                 title: row.get(1)?,
+                description: row.get(10)?,
                 branch_name: row.get(2)?,
                 status: TaskStatus::from_db(&status),
                 github_status: GithubStatus::from_db(&github_status),
@@ -146,19 +160,40 @@ impl Database {
             .context("could not load tasks")
     }
 
+    pub fn set_description(&self, task_id: i64, description: &str) -> Result<()> {
+        self.connection.execute(
+            "UPDATE tasks SET description = ?1 WHERE id = ?2",
+            params![description, task_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn set_status(&self, task_id: i64, status: TaskStatus) -> Result<()> {
+        let completed_at = (status == TaskStatus::Complete).then(|| Utc::now().timestamp());
+        self.connection.execute(
+            "UPDATE tasks SET status = ?1, completed_at = ?2 WHERE id = ?3",
+            params![status.as_str(), completed_at, task_id],
+        )?;
+        Ok(())
+    }
+
     pub fn apply_github_updates(&mut self, updates: &[GithubUpdate]) -> Result<()> {
         let checked_at = Utc::now().timestamp();
         let transaction = self.connection.transaction()?;
         for update in updates {
+            // Only a newly observed merge completes a task, so a merged task that was
+            // reopened by hand stays open.
             let completed_at = (update.status == GithubStatus::Merged).then_some(checked_at);
             transaction.execute(
                 "UPDATE tasks
-                 SET github_status = ?1,
+                 SET status = CASE WHEN ?5 IS NOT NULL AND github_status != 'merged'
+                                   THEN 'complete' ELSE status END,
+                     completed_at = CASE WHEN ?5 IS NOT NULL AND github_status != 'merged'
+                                         THEN COALESCE(completed_at, ?5) ELSE completed_at END,
+                     github_status = ?1,
                      pr_number = ?2,
                      pr_url = ?3,
-                     last_checked_at = ?4,
-                     status = CASE WHEN ?5 IS NOT NULL THEN 'complete' ELSE status END,
-                     completed_at = COALESCE(completed_at, ?5)
+                     last_checked_at = ?4
                  WHERE id = ?6",
                 params![
                     update.status.as_str(),
@@ -215,7 +250,7 @@ mod tests {
     fn persists_tasks_and_completion() {
         let directory = tempfile::tempdir().unwrap();
         let mut database = Database::open(&directory.path().join("tasks.db")).unwrap();
-        let task = database.create_task("icehunt", "Ship it").unwrap();
+        let task = database.create_task("icehunt", "Ship it", "").unwrap();
 
         database
             .apply_github_updates(&[GithubUpdate {
@@ -237,7 +272,7 @@ mod tests {
     fn closed_pull_requests_do_not_complete_tasks() {
         let directory = tempfile::tempdir().unwrap();
         let mut database = Database::open(&directory.path().join("tasks.db")).unwrap();
-        let task = database.create_task("icehunt", "Keep working").unwrap();
+        let task = database.create_task("icehunt", "Keep working", "").unwrap();
 
         database
             .apply_github_updates(&[GithubUpdate {
@@ -251,6 +286,92 @@ mod tests {
         let tasks = database.tasks().unwrap();
         assert_eq!(tasks[0].status, TaskStatus::Active);
         assert!(tasks[0].completed_at.is_none());
+    }
+
+    #[test]
+    fn marks_tasks_done_and_reopens_them() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut database = Database::open(&directory.path().join("tasks.db")).unwrap();
+        let task = database.create_task("icehunt", "Finish it", "").unwrap();
+
+        database.set_status(task.id, TaskStatus::Complete).unwrap();
+        let tasks = database.tasks().unwrap();
+        assert_eq!(tasks[0].status, TaskStatus::Complete);
+        assert!(tasks[0].completed_at.is_some());
+
+        database.set_status(task.id, TaskStatus::Active).unwrap();
+        let tasks = database.tasks().unwrap();
+        assert_eq!(tasks[0].status, TaskStatus::Active);
+        assert!(tasks[0].completed_at.is_none());
+    }
+
+    #[test]
+    fn reopened_merged_tasks_stay_open_after_refresh() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut database = Database::open(&directory.path().join("tasks.db")).unwrap();
+        let task = database.create_task("icehunt", "Follow up", "").unwrap();
+        let merged = GithubUpdate {
+            task_id: task.id,
+            status: GithubStatus::Merged,
+            pr_number: Some(14),
+            pr_url: None,
+        };
+
+        database
+            .apply_github_updates(std::slice::from_ref(&merged))
+            .unwrap();
+        database.set_status(task.id, TaskStatus::Active).unwrap();
+        database.apply_github_updates(&[merged]).unwrap();
+
+        let tasks = database.tasks().unwrap();
+        assert_eq!(tasks[0].status, TaskStatus::Active);
+        assert!(tasks[0].completed_at.is_none());
+    }
+
+    #[test]
+    fn persists_descriptions() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut database = Database::open(&directory.path().join("tasks.db")).unwrap();
+        let task = database
+            .create_task("icehunt", "Document it", "Explain the setup")
+            .unwrap();
+        assert_eq!(
+            database.tasks().unwrap()[0].description,
+            "Explain the setup"
+        );
+
+        database.set_description(task.id, "Updated").unwrap();
+        assert_eq!(database.tasks().unwrap()[0].description, "Updated");
+    }
+
+    #[test]
+    fn migrates_databases_without_descriptions() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("tasks.db");
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE tasks (
+                     id INTEGER PRIMARY KEY AUTOINCREMENT,
+                     title TEXT NOT NULL,
+                     branch_name TEXT NOT NULL UNIQUE,
+                     status TEXT NOT NULL DEFAULT 'active',
+                     github_status TEXT NOT NULL DEFAULT 'not_pushed',
+                     pr_number INTEGER,
+                     pr_url TEXT,
+                     created_at INTEGER NOT NULL,
+                     completed_at INTEGER,
+                     last_checked_at INTEGER
+                 );
+                 INSERT INTO tasks (title, branch_name, created_at)
+                 VALUES ('Old task', 'task/1-old-task', 0);
+                 PRAGMA user_version = 1;",
+            )
+            .unwrap();
+        drop(connection);
+
+        let database = Database::open(&path).unwrap();
+        assert_eq!(database.tasks().unwrap()[0].description, "");
     }
 
     #[test]

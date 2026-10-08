@@ -39,7 +39,9 @@ The SQLite database is stored at:
 
 | Key | Action |
 | --- | --- |
-| `c` | Create a task |
+| `c` | Create a task (`Tab` switches to the optional description) |
+| `d` | Mark the selected task done, or reopen it |
+| `e` | Edit the selected task's description |
 | `y` | Copy the selected branch name |
 | `r` | Refresh GitHub status |
 | `Enter` | Open or close task details |
@@ -68,7 +70,8 @@ are:
 - `Merged`
 
 Only `Merged` automatically completes a task. Closing a pull request without
-merging it leaves the task active.
+merging it leaves the task active. Press `d` to complete a task by hand, for
+example when it needed no pull request. Done tasks are no longer refreshed.
 
 ## Development
 
