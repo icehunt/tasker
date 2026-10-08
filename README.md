@@ -39,7 +39,8 @@ The SQLite database is stored at:
 
 | Key | Action |
 | --- | --- |
-| `c` | Create a task |
+| `c` | Create a task (`Tab` switches to the optional description) |
+| `e` | Edit the selected task's description |
 | `y` | Copy the selected branch name |
 | `r` | Refresh GitHub status |
 | `Enter` | Open or close task details |

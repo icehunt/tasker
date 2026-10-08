@@ -80,6 +80,7 @@ impl fmt::Display for GithubStatus {
 pub struct Task {
     pub id: i64,
     pub title: String,
+    pub description: String,
     pub branch_name: String,
     pub status: TaskStatus,
     pub github_status: GithubStatus,

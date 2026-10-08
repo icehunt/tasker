@@ -168,6 +168,7 @@ mod tests {
         Task {
             id,
             title: "Task".into(),
+            description: String::new(),
             branch_name: branch.into(),
             status: TaskStatus::Active,
             github_status: GithubStatus::Unknown,
