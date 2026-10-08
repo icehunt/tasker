@@ -181,15 +181,19 @@ impl Database {
         let checked_at = Utc::now().timestamp();
         let transaction = self.connection.transaction()?;
         for update in updates {
+            // Only a newly observed merge completes a task, so a merged task that was
+            // reopened by hand stays open.
             let completed_at = (update.status == GithubStatus::Merged).then_some(checked_at);
             transaction.execute(
                 "UPDATE tasks
-                 SET github_status = ?1,
+                 SET status = CASE WHEN ?5 IS NOT NULL AND github_status != 'merged'
+                                   THEN 'complete' ELSE status END,
+                     completed_at = CASE WHEN ?5 IS NOT NULL AND github_status != 'merged'
+                                         THEN COALESCE(completed_at, ?5) ELSE completed_at END,
+                     github_status = ?1,
                      pr_number = ?2,
                      pr_url = ?3,
-                     last_checked_at = ?4,
-                     status = CASE WHEN ?5 IS NOT NULL THEN 'complete' ELSE status END,
-                     completed_at = COALESCE(completed_at, ?5)
+                     last_checked_at = ?4
                  WHERE id = ?6",
                 params![
                     update.status.as_str(),
@@ -296,6 +300,29 @@ mod tests {
         assert!(tasks[0].completed_at.is_some());
 
         database.set_status(task.id, TaskStatus::Active).unwrap();
+        let tasks = database.tasks().unwrap();
+        assert_eq!(tasks[0].status, TaskStatus::Active);
+        assert!(tasks[0].completed_at.is_none());
+    }
+
+    #[test]
+    fn reopened_merged_tasks_stay_open_after_refresh() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut database = Database::open(&directory.path().join("tasks.db")).unwrap();
+        let task = database.create_task("icehunt", "Follow up", "").unwrap();
+        let merged = GithubUpdate {
+            task_id: task.id,
+            status: GithubStatus::Merged,
+            pr_number: Some(14),
+            pr_url: None,
+        };
+
+        database
+            .apply_github_updates(std::slice::from_ref(&merged))
+            .unwrap();
+        database.set_status(task.id, TaskStatus::Active).unwrap();
+        database.apply_github_updates(&[merged]).unwrap();
+
         let tasks = database.tasks().unwrap();
         assert_eq!(tasks[0].status, TaskStatus::Active);
         assert!(tasks[0].completed_at.is_none());
