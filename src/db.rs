@@ -168,6 +168,15 @@ impl Database {
         Ok(())
     }
 
+    pub fn set_status(&self, task_id: i64, status: TaskStatus) -> Result<()> {
+        let completed_at = (status == TaskStatus::Complete).then(|| Utc::now().timestamp());
+        self.connection.execute(
+            "UPDATE tasks SET status = ?1, completed_at = ?2 WHERE id = ?3",
+            params![status.as_str(), completed_at, task_id],
+        )?;
+        Ok(())
+    }
+
     pub fn apply_github_updates(&mut self, updates: &[GithubUpdate]) -> Result<()> {
         let checked_at = Utc::now().timestamp();
         let transaction = self.connection.transaction()?;
@@ -270,6 +279,23 @@ mod tests {
             }])
             .unwrap();
 
+        let tasks = database.tasks().unwrap();
+        assert_eq!(tasks[0].status, TaskStatus::Active);
+        assert!(tasks[0].completed_at.is_none());
+    }
+
+    #[test]
+    fn marks_tasks_done_and_reopens_them() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut database = Database::open(&directory.path().join("tasks.db")).unwrap();
+        let task = database.create_task("icehunt", "Finish it", "").unwrap();
+
+        database.set_status(task.id, TaskStatus::Complete).unwrap();
+        let tasks = database.tasks().unwrap();
+        assert_eq!(tasks[0].status, TaskStatus::Complete);
+        assert!(tasks[0].completed_at.is_some());
+
+        database.set_status(task.id, TaskStatus::Active).unwrap();
         let tasks = database.tasks().unwrap();
         assert_eq!(tasks[0].status, TaskStatus::Active);
         assert!(tasks[0].completed_at.is_none());

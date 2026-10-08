@@ -202,6 +202,8 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
         Line::from(vec![
             Span::styled("c", key_style()),
             Span::raw(" create  "),
+            Span::styled("d", key_style()),
+            Span::raw(" done  "),
             Span::styled("e", key_style()),
             Span::raw(" describe  "),
             Span::styled("y", key_style()),
@@ -328,7 +330,7 @@ fn render_details_dialog(frame: &mut Frame, app: &App) {
     frame.render_widget(
         Paragraph::new(lines).wrap(Wrap { trim: false }).block(
             Block::default()
-                .title(" Task details - e describe, y copy, Enter/Esc close ")
+                .title(" Task details - d done, e describe, y copy, Enter/Esc close ")
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(ACCENT)),
         ),

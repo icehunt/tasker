@@ -7,7 +7,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::db::Database;
 use crate::github;
-use crate::model::{GithubUpdate, Task};
+use crate::model::{GithubUpdate, Task, TaskStatus};
 
 const REFRESH_INTERVAL: Duration = Duration::from_secs(60);
 
@@ -152,6 +152,7 @@ impl App {
                     self.error = None;
                 }
             }
+            KeyCode::Char('d') => self.toggle_selected_done()?,
             KeyCode::Char('e') => self.start_editing_description(),
             KeyCode::Char('y') => self.copy_selected_branch(),
             KeyCode::Char('r') => {
@@ -271,11 +272,28 @@ impl App {
     fn handle_details_key(&mut self, key: KeyEvent) -> Result<()> {
         match key.code {
             KeyCode::Esc | KeyCode::Enter => self.mode = Mode::Normal,
+            KeyCode::Char('d') => self.toggle_selected_done()?,
             KeyCode::Char('e') => self.start_editing_description(),
             KeyCode::Char('y') => self.copy_selected_branch(),
             KeyCode::Char('q') => self.should_quit = true,
             _ => {}
         }
+        Ok(())
+    }
+
+    fn toggle_selected_done(&mut self) -> Result<()> {
+        let Some((id, status)) = self.selected_task().map(|task| (task.id, task.status)) else {
+            self.error = Some("There is no task to mark done".into());
+            return Ok(());
+        };
+        let (status, notice) = match status {
+            TaskStatus::Active => (TaskStatus::Complete, "Marked task done"),
+            TaskStatus::Complete => (TaskStatus::Active, "Reopened task"),
+        };
+        self.database.set_status(id, status)?;
+        self.reload_tasks(Some(id))?;
+        self.error = None;
+        self.notice = Some(notice.into());
         Ok(())
     }
 
@@ -351,7 +369,7 @@ impl App {
         let active_tasks = self
             .tasks
             .iter()
-            .filter(|task| task.status == crate::model::TaskStatus::Active)
+            .filter(|task| task.status == TaskStatus::Active)
             .cloned()
             .collect::<Vec<_>>();
         let (sender, receiver) = mpsc::channel();

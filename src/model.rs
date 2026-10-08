@@ -7,6 +7,13 @@ pub enum TaskStatus {
 }
 
 impl TaskStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Complete => "complete",
+        }
+    }
+
     pub fn from_db(value: &str) -> Self {
         match value {
             "complete" => Self::Complete,
