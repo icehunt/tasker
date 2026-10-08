@@ -263,18 +263,11 @@ fn render_create_dialog(frame: &mut Frame, app: &App) {
     for (field, title, value, area) in fields {
         let focused = app.create_field == field;
         let border = if focused { ACCENT } else { Color::DarkGray };
-        frame.render_widget(
-            Paragraph::new(value).wrap(Wrap { trim: false }).block(
-                Block::default()
-                    .title(title)
-                    .borders(Borders::ALL)
-                    .border_style(Style::default().fg(border)),
-            ),
-            area,
-        );
-        if focused {
-            set_input_cursor(frame, value, area);
-        }
+        let block = Block::default()
+            .title(title)
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(border));
+        render_input(frame, value, block, area, focused);
     }
     frame.render_widget(
         Paragraph::new("Tab switch field  |  Enter create  |  Esc cancel")
@@ -297,30 +290,51 @@ fn render_description_dialog(frame: &mut Frame, app: &App) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
     let sections = Layout::vertical([Constraint::Length(5), Constraint::Length(1)]).split(inner);
-    frame.render_widget(
-        Paragraph::new(app.input.as_str())
-            .wrap(Wrap { trim: false })
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_style(Style::default().fg(Color::Gray)),
-            ),
-        sections[0],
-    );
-    set_input_cursor(frame, &app.input, sections[0]);
+    let input_block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Gray));
+    render_input(frame, &app.input, input_block, sections[0], true);
     frame.render_widget(
         Paragraph::new("Enter save  |  Esc cancel").alignment(Alignment::Right),
         sections[1],
     );
 }
 
-/// Places the cursor after `value` inside a bordered, character-wrapped input box.
-fn set_input_cursor(frame: &mut Frame, value: &str, area: Rect) {
-    let width = area.width.saturating_sub(2).max(1);
-    let length = value.chars().count() as u16;
-    let row = (length / width).min(area.height.saturating_sub(3));
-    let column = length % width;
-    frame.set_cursor_position((area.x + 1 + column, area.y + 1 + row));
+/// Renders a text input wrapped at character boundaries, scrolled so the end of
+/// `value` stays visible, with the cursor placed after the last character.
+fn render_input(frame: &mut Frame, value: &str, block: Block, area: Rect, focused: bool) {
+    let inner = block.inner(area);
+    let lines = wrap_chars(value, inner.width.max(1) as usize);
+    let cursor_row = lines.len().saturating_sub(1) as u16;
+    let cursor_column = lines.last().map_or(0, |line| line.chars().count()) as u16;
+    let scroll = (cursor_row + 1).saturating_sub(inner.height);
+    let lines = lines.into_iter().map(Line::from).collect::<Vec<_>>();
+    frame.render_widget(Paragraph::new(lines).scroll((scroll, 0)).block(block), area);
+    if focused && inner.height > 0 {
+        frame.set_cursor_position((inner.x + cursor_column, inner.y + cursor_row - scroll));
+    }
+}
+
+/// Splits `value` into rows of at most `width` characters. A full last row is
+/// followed by an empty one, which is where the cursor goes next.
+fn wrap_chars(value: &str, width: usize) -> Vec<String> {
+    let mut lines = vec![String::new()];
+    for character in value.chars() {
+        if lines
+            .last()
+            .is_some_and(|line| line.chars().count() == width)
+        {
+            lines.push(String::new());
+        }
+        lines.last_mut().unwrap().push(character);
+    }
+    if lines
+        .last()
+        .is_some_and(|line| line.chars().count() == width)
+    {
+        lines.push(String::new());
+    }
+    lines
 }
 
 fn render_details_dialog(frame: &mut Frame, app: &App) {
@@ -392,4 +406,16 @@ fn format_timestamp(timestamp: i64) -> String {
                 .to_string()
         })
         .unwrap_or_else(|| "Unknown".into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wraps_input_at_character_boundaries() {
+        assert_eq!(wrap_chars("", 4), [""]);
+        assert_eq!(wrap_chars("abc de", 4), ["abc ", "de"]);
+        assert_eq!(wrap_chars("abcd", 4), ["abcd", ""]);
+    }
 }
